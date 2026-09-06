@@ -99,7 +99,8 @@ func getContactMutex(phone string) *sync.Mutex {
 // successful targets still receive the event.
 func forwardPayloadToConfiguredWebhooks(ctx context.Context, payload map[string]any, eventName string) error {
 	deviceJID, _ := payload["device_id"].(string)
-	webhookConfig, err := getWebhookConfigForDevice(deviceJID)
+	deviceADJID := addWebhookDeviceADJID(ctx, payload)
+	webhookConfig, err := getWebhookConfigForDevice(deviceJID, deviceADJID)
 	if err != nil {
 		// A config lookup failure is not a delivery failure: fall back to the global
 		// webhook config so the event still reaches the global targets and Chatwoot.
@@ -162,7 +163,26 @@ func getDeviceRecordForTest(deviceJID string) (*domainChatStorage.DeviceRecord, 
 // getWebhookConfigForDevice returns the webhook configuration to use for a given device.
 // If the device has a custom webhook config, it returns that config.
 // Otherwise, it returns nil (caller should use global config).
-func getWebhookConfigForDevice(deviceJID string) (*domainChatStorage.DeviceWebhookConfig, error) {
+//
+// The AD JID (deviceADJID) is tried first: it pins the exact companion session, so
+// two devices sharing a bare phone number (see GetDeviceRecordByJID's ambiguity
+// guard, issue: two GOWA devices logged in with the same number both silently fell
+// back to the global config because the bare-JID lookup refused to pick a side)
+// resolve to their own distinct per-device record instead of both losing their
+// config to the ambiguity fallback. The bare JID (deviceJID) is only consulted when
+// no AD JID is available (e.g. older events built before the AD JID was threaded
+// through, or a device that has not completed a session handshake yet).
+func getWebhookConfigForDevice(deviceJID, deviceADJID string) (*domainChatStorage.DeviceWebhookConfig, error) {
+	if strings.TrimSpace(deviceADJID) != "" {
+		record, err := getDeviceRecordForTest(deviceADJID)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get device record by ad jid: %w", err)
+		}
+		if record != nil {
+			return deviceWebhookConfigFromRecord(deviceADJID, record), nil
+		}
+	}
+
 	if deviceJID == "" {
 		return nil, nil
 	}
@@ -171,17 +191,23 @@ func getWebhookConfigForDevice(deviceJID string) (*domainChatStorage.DeviceWebho
 	if err != nil {
 		return nil, fmt.Errorf("failed to get device record: %w", err)
 	}
-	if record != nil && record.WebhookURL != nil && *record.WebhookURL != "" {
-		logrus.Debugf("Using device-specific webhook config for %s", deviceJID)
-		return &domainChatStorage.DeviceWebhookConfig{
-			WebhookURL:                record.WebhookURL,
-			WebhookSecret:             record.WebhookSecret,
-			WebhookEvents:             record.WebhookEvents,
-			WebhookInsecureSkipVerify: record.WebhookInsecureSkipVerify,
-		}, nil
-	}
+	return deviceWebhookConfigFromRecord(deviceJID, record), nil
+}
 
-	return nil, nil
+// deviceWebhookConfigFromRecord builds the per-device webhook config from a
+// resolved device record, or returns nil when the record has no webhook URL
+// configured (the caller then falls back to the global webhook config).
+func deviceWebhookConfigFromRecord(logJID string, record *domainChatStorage.DeviceRecord) *domainChatStorage.DeviceWebhookConfig {
+	if record == nil || record.WebhookURL == nil || *record.WebhookURL == "" {
+		return nil
+	}
+	logrus.Debugf("Using device-specific webhook config for %s", logJID)
+	return &domainChatStorage.DeviceWebhookConfig{
+		WebhookURL:                record.WebhookURL,
+		WebhookSecret:             record.WebhookSecret,
+		WebhookEvents:             record.WebhookEvents,
+		WebhookInsecureSkipVerify: record.WebhookInsecureSkipVerify,
+	}
 }
 
 // getWebhookURLsFromConfig extracts webhook URLs from the config.
@@ -249,6 +275,28 @@ func addWebhookSessionID(payload map[string]any) {
 	if sessionID := sessionIDForJIDFn(jid); sessionID != "" {
 		payload["session_id"] = sessionID
 	}
+}
+
+// addWebhookDeviceADJID stamps the payload with the full AD JID
+// (number:NN@s.whatsapp.net) of the device instance attached to ctx, under the
+// new "device_ad_jid" field, and returns that value. device_id is left
+// untouched (external consumers key on it as the bare JID). Returns "" without
+// touching the payload when ctx carries no device instance or the instance has
+// no AD JID yet (e.g. not connected), so callers fall back to the
+// (possibly-ambiguous) bare-JID lookup.
+func addWebhookDeviceADJID(ctx context.Context, payload map[string]any) string {
+	instance, ok := DeviceFromContext(ctx)
+	if !ok || instance == nil {
+		return ""
+	}
+	adJID := instance.ADJID()
+	if adJID == "" {
+		return ""
+	}
+	if payload != nil {
+		payload["device_ad_jid"] = adJID
+	}
+	return adJID
 }
 
 // sessionIDForJID resolves the session id registered via POST /devices for a
