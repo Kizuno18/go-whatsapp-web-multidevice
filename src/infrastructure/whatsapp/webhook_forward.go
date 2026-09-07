@@ -99,6 +99,11 @@ func getContactMutex(phone string) *sync.Mutex {
 // successful targets still receive the event.
 func forwardPayloadToConfiguredWebhooks(ctx context.Context, payload map[string]any, eventName string) error {
 	deviceJID, _ := payload["device_id"].(string)
+	if inst, ok := DeviceFromContext(ctx); ok && inst != nil {
+		if adJID := inst.ADJID(); adJID != "" {
+			payload["device_ad_jid"] = adJID
+		}
+	}
 	record, err := resolveWebhookDeviceRecord(ctx, payload)
 	recordResolutionFailed := err != nil
 	if recordResolutionFailed {
