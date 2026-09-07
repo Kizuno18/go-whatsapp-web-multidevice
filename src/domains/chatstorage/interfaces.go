@@ -31,6 +31,10 @@ type IChatStorageRepository interface {
 	GetMessageByIDChatAndDevice(deviceID, chatJID, id string) (*Message, error) // Full storage identity lookup for chat-scoped flows
 	GetMessageEdits(originalMessageID, deviceID string) ([]*MessageEdit, error)
 	GetMessages(filter *MessageFilter) ([]*Message, error)
+	// GetOldestMessageByDevice returns the earliest stored message for a chat,
+	// used to anchor on-demand history sync requests. Returns nil (no error)
+	// when the chat has no stored messages.
+	GetOldestMessageByDevice(deviceID, chatJID string) (*Message, error)
 	SearchMessages(deviceID, chatJID, searchText string, limit int) ([]*Message, error) // Database-level search with device isolation
 	// GetCallRecords lists call records (media_type "call") newest first, plus the unpaginated total.
 	GetCallRecords(filter *CallRecordFilter) ([]*Message, int64, error)
