@@ -157,6 +157,9 @@ type DeviceRecord struct {
 	WebhookSecret             string    `db:"webhook_secret"`
 	WebhookEvents             string    `db:"webhook_events"`
 	WebhookInsecureSkipVerify bool      `db:"webhook_insecure_skip_verify"`
+	WebhookIgnoreGroups       *bool     `db:"webhook_ignore_groups"`
+	ChatStorage               *bool     `db:"chat_storage"`
+	AutoDownloadMedia         *bool     `db:"auto_download_media"`
 	CreatedAt                 time.Time `db:"created_at"`
 	UpdatedAt                 time.Time `db:"updated_at"`
 }
@@ -167,6 +170,39 @@ type DeviceWebhookConfig struct {
 	WebhookSecret             string  `json:"webhook_secret,omitempty"`
 	WebhookEvents             string  `json:"webhook_events,omitempty"`
 	WebhookInsecureSkipVerify bool    `json:"webhook_insecure_skip_verify,omitempty"`
+	// WebhookIgnoreGroups overrides WHATSAPP_WEBHOOK_IGNORE_JIDS's "@g.us" wildcard
+	// for this device specifically. nil means "never configured" — the resolver
+	// falls back to whether the global ignore list contains "@g.us".
+	WebhookIgnoreGroups *bool `json:"webhook_ignore_groups,omitempty"`
+	// WebhookIgnoreGroupsSet tells SetDeviceWebhookConfig whether WebhookIgnoreGroups
+	// carries an explicit value to write (true, false, or nil to clear) or should be
+	// left untouched at the stored value. It lets the repository apply the PATCH
+	// tri-state ("omitted preserves") atomically in the update statement itself,
+	// instead of the caller reading the current value first and writing it back --
+	// a read-modify-write that a concurrent update could race and overwrite.
+	WebhookIgnoreGroupsSet bool `json:"-"`
+}
+
+// DeviceStorageSettings holds the per-device overrides for chat storage and
+// automatic media downloads. A nil field means "no override configured" —
+// callers on the message path fall back to the instance-wide default
+// (chat storage is always on; auto_download_media follows
+// --auto-download-media / WHATSAPP_AUTO_DOWNLOAD_MEDIA).
+type DeviceStorageSettings struct {
+	ChatStorage       *bool `json:"chat_storage"`
+	AutoDownloadMedia *bool `json:"auto_download_media"`
+}
+
+// DeviceStoragePatch describes a partial update to DeviceStorageSettings, as sent
+// through PATCH /devices/{device_id}/settings. HasChatStorage/HasAutoDownloadMedia
+// distinguish "the field was absent from the request body" (leave the stored value
+// untouched) from "the field was present" — when present, a nil pointer clears the
+// override back to "follow the instance default", and a non-nil pointer pins it.
+type DeviceStoragePatch struct {
+	HasChatStorage       bool
+	ChatStorage          *bool
+	HasAutoDownloadMedia bool
+	AutoDownloadMedia    *bool
 }
 
 // MessageFilter represents query filters for messages
@@ -179,6 +215,15 @@ type MessageFilter struct {
 	EndTime   *time.Time
 	MediaOnly bool
 	IsFromMe  *bool
+}
+
+// CallRecordFilter represents query filters for stored call records
+// (synthetic messages with media_type "call").
+type CallRecordFilter struct {
+	DeviceID string
+	ChatJID  string
+	Limit    int
+	Offset   int
 }
 
 // ChatFilter represents query filters for chats

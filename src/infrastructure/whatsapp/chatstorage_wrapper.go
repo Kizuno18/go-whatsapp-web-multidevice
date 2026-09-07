@@ -142,6 +142,13 @@ func (r *deviceChatStorage) SearchMessages(deviceID, chatJID, searchText string,
 	return r.base.SearchMessages(targetDeviceID, chatJID, searchText, limit)
 }
 
+func (r *deviceChatStorage) GetCallRecords(filter *domainChatStorage.CallRecordFilter) ([]*domainChatStorage.Message, int64, error) {
+	if filter != nil && filter.DeviceID == "" {
+		filter.DeviceID = r.deviceID
+	}
+	return r.base.GetCallRecords(filter)
+}
+
 func (r *deviceChatStorage) DeleteMessage(id, chatJID string) error {
 	return r.base.DeleteMessageByDevice(r.deviceID, id, chatJID)
 }
@@ -388,4 +395,15 @@ func (r *deviceChatStorage) SetDeviceWebhookConfig(deviceID string, config *doma
 // GetDeviceWebhookConfig retrieves the complete webhook configuration for a device.
 func (r *deviceChatStorage) GetDeviceWebhookConfig(deviceID string) (*domainChatStorage.DeviceWebhookConfig, error) {
 	return r.base.GetDeviceWebhookConfig(deviceID)
+}
+
+// SetDeviceStorageSettings applies a partial update to a device's chat_storage /
+// auto_download_media overrides.
+func (r *deviceChatStorage) SetDeviceStorageSettings(deviceID string, patch domainChatStorage.DeviceStoragePatch) error {
+	return r.base.SetDeviceStorageSettings(deviceID, patch)
+}
+
+// GetDeviceStorageSettings retrieves a device's chat_storage / auto_download_media overrides.
+func (r *deviceChatStorage) GetDeviceStorageSettings(deviceID string) (*domainChatStorage.DeviceStorageSettings, error) {
+	return r.base.GetDeviceStorageSettings(deviceID)
 }

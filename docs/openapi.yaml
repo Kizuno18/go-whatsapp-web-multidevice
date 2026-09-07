@@ -773,6 +773,14 @@ paths:
                         type: boolean
                         description: Whether TLS verification is skipped for this device webhook
                         example: false
+                      webhook_ignore_groups:
+                        type: boolean
+                        nullable: true
+                        description: >-
+                          Per-device override for dropping group (`@g.us`) messages from webhook
+                          forwarding. `null` means the device never set one and the global
+                          `WHATSAPP_WEBHOOK_IGNORE_JIDS` list applies.
+                        example: true
         '404':
           description: Device not found
           content:
@@ -796,6 +804,10 @@ paths:
         `webhook_events`, and `webhook_insecure_skip_verify` override the global webhook settings for this device.
 
         Set to empty string to clear and use the global webhook.
+
+        `webhook_ignore_groups` is tri-state: omitting the key keeps the stored override, `null`
+        clears it back to the global `WHATSAPP_WEBHOOK_IGNORE_JIDS` behaviour, and `true`/`false`
+        sets it for this device.
       parameters:
         - name: device_id
           in: path
@@ -826,6 +838,17 @@ paths:
                   type: boolean
                   description: Optional. Skip TLS certificate verification for this device webhook.
                   example: false
+                webhook_ignore_groups:
+                  type: boolean
+                  nullable: true
+                  description: >-
+                    Optional per-device override for dropping group (`@g.us`) messages from
+                    webhook forwarding. Omit the key to keep the stored value, send `null` to
+                    clear the override and fall back to the global
+                    `WHATSAPP_WEBHOOK_IGNORE_JIDS` list, or send `true`/`false` to set it.
+                    The override only replaces the global `@g.us` wildcard; exact group JIDs
+                    listed globally are still honoured.
+                  example: true
               required:
                 - webhook_url
       responses:
@@ -868,6 +891,166 @@ paths:
                         type: boolean
                         description: Whether TLS verification is skipped for this device webhook
                         example: false
+                      webhook_ignore_groups:
+                        type: boolean
+                        nullable: true
+                        description: The per-device group-ignore override in effect after the update
+                        example: true
+        '400':
+          description: Bad Request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBadRequest'
+        '404':
+          description: Device not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorNotFound'
+        '500':
+          description: Internal Server Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorInternalServer'
+
+  /devices/{device_id}/settings:
+    get:
+      operationId: getDeviceStorageSettings
+      tags:
+        - device
+      summary: Get device storage settings
+      description: |
+        Get the per-device chat_storage / auto_download_media overrides for a specific device.
+        A null value means the device has no override and follows the instance-wide default
+        (chat storage is always on; auto_download_media follows --auto-download-media /
+        WHATSAPP_AUTO_DOWNLOAD_MEDIA).
+      parameters:
+        - name: device_id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: Device ID
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: integer
+                    example: 200
+                  code:
+                    type: string
+                    example: SUCCESS
+                  message:
+                    type: string
+                    example: Device storage settings retrieved
+                  results:
+                    type: object
+                    properties:
+                      device_id:
+                        type: string
+                        description: The device ID
+                        example: 'my-device'
+                      chat_storage:
+                        type: boolean
+                        nullable: true
+                        description: Per-device chat storage override. Null follows the instance-wide default (always on).
+                        example: false
+                      auto_download_media:
+                        type: boolean
+                        nullable: true
+                        description: Per-device auto-download-media override. Null follows --auto-download-media / WHATSAPP_AUTO_DOWNLOAD_MEDIA.
+                        example: true
+        '404':
+          description: Device not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorNotFound'
+        '500':
+          description: Internal Server Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorInternalServer'
+    patch:
+      operationId: updateDeviceStorageSettings
+      tags:
+        - device
+      summary: Set device storage settings
+      description: |
+        Apply a partial update to a device's chat_storage / auto_download_media overrides.
+        Only the fields present in the request body are changed — an omitted field keeps its
+        current value. A field sent as `null` clears the override, falling back to the
+        instance-wide default. At least one of chat_storage or auto_download_media is required.
+
+        Useful when one instance hosts many devices: specific devices (e.g. notification-only
+        accounts) can be kept out of chat storage or off automatic media downloads without
+        changing the instance-wide flags for every other device.
+      parameters:
+        - name: device_id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: Device ID
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              minProperties: 1
+              additionalProperties: false
+              properties:
+                chat_storage:
+                  type: boolean
+                  nullable: true
+                  description: Set to enable/disable chat storage for this device, or null to clear the override.
+                  example: false
+                auto_download_media:
+                  type: boolean
+                  nullable: true
+                  description: Set to enable/disable auto media download for this device, or null to clear the override.
+                  example: true
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: integer
+                    example: 200
+                  code:
+                    type: string
+                    example: SUCCESS
+                  message:
+                    type: string
+                    example: Device storage settings updated
+                  results:
+                    type: object
+                    properties:
+                      device_id:
+                        type: string
+                        description: The device ID
+                        example: 'my-device'
+                      chat_storage:
+                        type: boolean
+                        nullable: true
+                        example: false
+                      auto_download_media:
+                        type: boolean
+                        nullable: true
+                        example: true
         '400':
           description: Bad Request
           content:
@@ -2476,6 +2659,65 @@ paths:
                 $ref: '#/components/schemas/ErrorBadRequest'
         '500':
           description: Internal Server Error (call already ended, not connected, etc.)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorInternalServer'
+
+  /call/logs:
+    get:
+      operationId: listCallLogs
+      tags:
+        - call
+      summary: Get list of call logs
+      description: |
+        List the incoming calls recorded for the current device, newest first.
+
+        Calls are captured by the `call.offer` handler, so the log covers incoming calls that arrived
+        while the device was connected. Outgoing calls, call duration and answered/ended outcomes are
+        not tracked yet.
+      parameters:
+        - $ref: '#/components/parameters/DeviceIdHeader'
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 25
+            maximum: 100
+          description: Maximum number of call logs to return
+        - name: offset
+          in: query
+          schema:
+            type: integer
+            default: 0
+          description: Number of call logs to skip (for pagination)
+        - name: chat_jid
+          in: query
+          schema:
+            type: string
+          description: Only return calls belonging to this chat JID
+          example: '6289685028129@s.whatsapp.net'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CallLogListResponse'
+        '400':
+          description: Bad Request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBadRequest'
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorUnauthorized'
+        '500':
+          description: Internal Server Error
           content:
             application/json:
               schema:
@@ -5288,6 +5530,83 @@ components:
                     type: string
                     example: '18:00'
 
+    CallLogListResponse:
+      type: object
+      properties:
+        code:
+          type: string
+          example: SUCCESS
+        message:
+          type: string
+          example: Success get call logs
+        results:
+          type: object
+          properties:
+            data:
+              type: array
+              items:
+                $ref: '#/components/schemas/CallLog'
+            pagination:
+              type: object
+              properties:
+                limit:
+                  type: integer
+                  example: 25
+                offset:
+                  type: integer
+                  example: 0
+                total:
+                  type: integer
+                  example: 12
+
+    CallLog:
+      type: object
+      properties:
+        id:
+          type: string
+          example: 'call:ABC123DEF456'
+          description: Stored record identifier (`call:` prefix plus the call id)
+        chat_jid:
+          type: string
+          example: '6289685028129@s.whatsapp.net'
+          description: Chat the call belongs to (group JID for group calls)
+        sender_jid:
+          type: string
+          example: '6289685028129@s.whatsapp.net'
+          description: JID of the caller
+        timestamp:
+          type: string
+          format: date-time
+          example: '2024-01-15T10:30:00Z'
+          description: When the call offer was received
+        is_from_me:
+          type: boolean
+          example: false
+          description: Always false today; only incoming calls are recorded
+        call_metadata:
+          type: object
+          properties:
+            call_id:
+              type: string
+              example: 'ABC123DEF456'
+              description: Call identifier, also usable with POST /call/reject
+            auto_rejected:
+              type: boolean
+              example: false
+              description: Whether the call was rejected by WHATSAPP_AUTO_REJECT_CALL
+            remote_platform:
+              type: string
+              example: 'android'
+              description: Caller platform, when reported
+            remote_version:
+              type: string
+              example: '2.24.1.75'
+              description: Caller app version, when reported
+            group_jid:
+              type: string
+              example: '120363123456789@g.us'
+              description: Group JID for group calls
+
     ChatListResponse:
       type: object
       properties:
@@ -5435,6 +5754,10 @@ components:
           type: string
           example: '{"call_id":"ABC","auto_rejected":false}'
           description: JSON string with call details when media_type is `call`. Omitted when not applicable (matches Go json omitempty).
+        referral_metadata:
+          type: string
+          example: '{"ctwa_clid":"clid_123","source_app":"whatsapp"}'
+          description: JSON string with Meta Ads referral/attribution details when the message originated from a Click-to-WhatsApp ad. Omitted when not applicable (matches Go json omitempty).
         filename:
           type: string
           example: 'photo.jpg'

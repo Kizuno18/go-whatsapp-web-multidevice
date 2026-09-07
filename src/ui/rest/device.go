@@ -1,6 +1,7 @@
 package rest
 
 import (
+	"encoding/json"
 	"fmt"
 
 	"github.com/aldinokemal/go-whatsapp-web-multidevice/config"
@@ -30,6 +31,8 @@ func InitRestDevice(app fiber.Router, service device.IDeviceUsecase) Device {
 	app.Get("/devices/:device_id/status", rest.Status)
 	app.Patch("/devices/:device_id/webhook", rest.UpdateDeviceWebhook)
 	app.Get("/devices/:device_id/webhook", rest.GetDeviceWebhook)
+	app.Patch("/devices/:device_id/settings", rest.UpdateDeviceStorageSettings)
+	app.Get("/devices/:device_id/settings", rest.GetDeviceStorageSettings)
 
 	return rest
 }
@@ -209,6 +212,9 @@ func (handler *Device) UpdateDeviceWebhook(c fiber.Ctx) error {
 		WebhookSecret             string  `json:"webhook_secret"`
 		WebhookEvents             string  `json:"webhook_events"`
 		WebhookInsecureSkipVerify bool    `json:"webhook_insecure_skip_verify"`
+		// Tri-state: absent keeps the stored override, null clears it back to the
+		// global "@g.us" wildcard, true/false sets it for this device.
+		WebhookIgnoreGroups utils.Nullable[bool] `json:"webhook_ignore_groups"`
 	}
 
 	if err := c.Bind().Body(&req); err != nil {
@@ -229,15 +235,30 @@ func (handler *Device) UpdateDeviceWebhook(c fiber.Ctx) error {
 		})
 	}
 
+	// WebhookIgnoreGroups preservation ("omitted keeps the stored value") is applied
+	// atomically by the repository's update statement (WebhookIgnoreGroupsSet), not
+	// read here and written back -- a read-modify-write could race a concurrent
+	// explicit update and overwrite it with a stale value.
 	config := &chatstorage.DeviceWebhookConfig{
 		WebhookURL:                req.WebhookURL,
 		WebhookSecret:             req.WebhookSecret,
 		WebhookEvents:             req.WebhookEvents,
 		WebhookInsecureSkipVerify: req.WebhookInsecureSkipVerify,
+		WebhookIgnoreGroups:       req.WebhookIgnoreGroups.Ptr(),
+		WebhookIgnoreGroupsSet:    req.WebhookIgnoreGroups.Set,
 	}
 
 	err := handler.Service.SetDeviceWebhookConfig(c.Context(), deviceID, config)
 	utils.PanicIfNeeded(err)
+
+	ignoreGroups := config.WebhookIgnoreGroups
+	if !req.WebhookIgnoreGroups.Set {
+		// Report the value actually stored after the atomic preserve, not a value
+		// read before the write (which could already be stale by response time).
+		if current, err := handler.Service.GetDeviceWebhookConfig(c.Context(), deviceID); err == nil && current != nil {
+			ignoreGroups = current.WebhookIgnoreGroups
+		}
+	}
 
 	return c.JSON(utils.ResponseData{
 		Status:  200,
@@ -249,6 +270,7 @@ func (handler *Device) UpdateDeviceWebhook(c fiber.Ctx) error {
 			"webhook_secret":               req.WebhookSecret,
 			"webhook_events":               req.WebhookEvents,
 			"webhook_insecure_skip_verify": req.WebhookInsecureSkipVerify,
+			"webhook_ignore_groups":        ignoreGroups,
 		},
 	})
 }
@@ -289,6 +311,118 @@ func (handler *Device) GetDeviceWebhook(c fiber.Ctx) error {
 				}
 				return false
 			}(),
+			"webhook_ignore_groups": func() *bool {
+				if config != nil {
+					return config.WebhookIgnoreGroups
+				}
+				return nil
+			}(),
 		},
 	})
+}
+
+// UpdateDeviceStorageSettings handles PATCH /devices/:device_id/settings.
+//
+// The body is parsed as a raw JSON object (rather than a struct of *bool fields)
+// so a field that is absent (leave the stored override untouched) can be told
+// apart from a field explicitly sent as null (clear the override, follow the
+// instance default): a struct field of type *bool decodes to nil in both cases.
+func (handler *Device) UpdateDeviceStorageSettings(c fiber.Ctx) error {
+	deviceID := c.Params("device_id")
+
+	var raw map[string]json.RawMessage
+	if err := c.Bind().Body(&raw); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(utils.ResponseData{
+			Status:  400,
+			Code:    "BAD_REQUEST",
+			Message: "Invalid request body",
+			Results: nil,
+		})
+	}
+
+	var patch chatstorage.DeviceStoragePatch
+
+	if rawValue, ok := raw["chat_storage"]; ok {
+		var value *bool
+		if err := json.Unmarshal(rawValue, &value); err != nil {
+			return c.Status(fiber.StatusBadRequest).JSON(utils.ResponseData{
+				Status:  400,
+				Code:    "BAD_REQUEST",
+				Message: "chat_storage must be a boolean or null",
+				Results: nil,
+			})
+		}
+		patch.HasChatStorage = true
+		patch.ChatStorage = value
+	}
+
+	if rawValue, ok := raw["auto_download_media"]; ok {
+		var value *bool
+		if err := json.Unmarshal(rawValue, &value); err != nil {
+			return c.Status(fiber.StatusBadRequest).JSON(utils.ResponseData{
+				Status:  400,
+				Code:    "BAD_REQUEST",
+				Message: "auto_download_media must be a boolean or null",
+				Results: nil,
+			})
+		}
+		patch.HasAutoDownloadMedia = true
+		patch.AutoDownloadMedia = value
+	}
+
+	if !patch.HasChatStorage && !patch.HasAutoDownloadMedia {
+		return c.Status(fiber.StatusBadRequest).JSON(utils.ResponseData{
+			Status:  400,
+			Code:    "BAD_REQUEST",
+			Message: "at least one of chat_storage or auto_download_media is required",
+			Results: nil,
+		})
+	}
+
+	err := handler.Service.SetDeviceStorageSettings(c.Context(), deviceID, patch)
+	utils.PanicIfNeeded(err)
+
+	settings, err := handler.Service.GetDeviceStorageSettings(c.Context(), deviceID)
+	utils.PanicIfNeeded(err)
+
+	return c.JSON(utils.ResponseData{
+		Status:  200,
+		Code:    "SUCCESS",
+		Message: "Device storage settings updated",
+		Results: deviceStorageSettingsResult(deviceID, settings),
+	})
+}
+
+// GetDeviceStorageSettings handles GET /devices/:device_id/settings.
+func (handler *Device) GetDeviceStorageSettings(c fiber.Ctx) error {
+	deviceID := c.Params("device_id")
+	settings, err := handler.Service.GetDeviceStorageSettings(c.Context(), deviceID)
+	utils.PanicIfNeeded(err)
+
+	return c.JSON(utils.ResponseData{
+		Status:  200,
+		Code:    "SUCCESS",
+		Message: "Device storage settings retrieved",
+		Results: deviceStorageSettingsResult(deviceID, settings),
+	})
+}
+
+// deviceStorageSettingsResult builds the JSON-serializable response body shared
+// by GET and PATCH /devices/:device_id/settings. A nil field means the device
+// has no override and follows the instance-wide default.
+func deviceStorageSettingsResult(deviceID string, settings *chatstorage.DeviceStorageSettings) map[string]any {
+	var chatStorage, autoDownloadMedia any
+	if settings != nil {
+		if settings.ChatStorage != nil {
+			chatStorage = *settings.ChatStorage
+		}
+		if settings.AutoDownloadMedia != nil {
+			autoDownloadMedia = *settings.AutoDownloadMedia
+		}
+	}
+	return map[string]any{
+		"device_id":           deviceID,
+		"chat_storage":        chatStorage,
+		"auto_download_media": autoDownloadMedia,
+	}
 }

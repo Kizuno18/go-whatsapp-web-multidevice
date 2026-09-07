@@ -144,6 +144,16 @@ Download:
   - When a device has a custom webhook, events for that device are sent to the device-specific URL.
   - When no device webhook is set, events fall back to the global webhook (`--webhook`).
   - Set `webhook_url` to an empty string with `PATCH` to clear it and use the global webhook.
+- **Per-device storage settings** — Each device can override chat storage and automatic media
+  download independently of the instance-wide flags.
+  - Set via API: `PATCH /devices/:device_id/settings` with `{"chat_storage": false}`,
+    `{"auto_download_media": true}`, or both. Only the fields present in the body are changed.
+  - Get via API: `GET /devices/:device_id/settings`.
+  - A field is `null` when the device has no override: chat storage falls back to always-on,
+    auto_download_media falls back to `--auto-download-media` / `WHATSAPP_AUTO_DOWNLOAD_MEDIA`.
+  - Send a field as `null` with `PATCH` to clear that override.
+  - Useful when one instance hosts many devices — e.g. keeping a notification-only
+    device out of chat storage without changing the flags for every other device.
 - **Webhook signatures** — Webhook requests include an HMAC-SHA-256 signature in the `X-Hub-Signature-256`
   header, generated with the default key `secret`.
 
@@ -289,6 +299,40 @@ To use environment variables:
 | `CHATWOOT_FORWARD_DELETES`              | Mirror WhatsApp delete-for-everyone events into Chatwoot notes | `true`                                      | `CHATWOOT_FORWARD_DELETES=false`              |
 | `CHATWOOT_MESSAGE_READ`                 | Sync read state for linked WhatsApp/Chatwoot messages         | `false`                                      | `CHATWOOT_MESSAGE_READ=true`                  |
 | `CHATWOOT_MESSAGE_DELETE`               | Delete linked opposite-side messages when deletion is reported | `false`                                     | `CHATWOOT_MESSAGE_DELETE=true`                |
+
+#### PostgreSQL schema isolation
+
+`DB_URI` (and `DB_KEYS_URI`) are handed to the PostgreSQL driver as-is, so
+`search_path` works as a normal connection parameter. Use it to keep the
+`whatsmeow_*` tables out of `public` on a shared database such as Supabase:
+
+```env
+DB_URI=postgres://user:pass@host:5432/db?sslmode=require&search_path=whatsapp
+```
+
+Use at least `sslmode=require` on a remote/shared database — `DB_URI` carries
+both the database credentials and the WhatsApp session/key material. For
+production, prefer `sslmode=verify-full` with `sslrootcert` pointing at the
+provider's CA certificate, so the connection also validates the server
+identity.
+
+Create the schema before the first start — the app does not create it:
+
+```sql
+CREATE SCHEMA whatsapp;
+```
+
+Starting against a missing schema fails with
+`pq: no schema has been selected to create in (3F000)`.
+
+The schema must also be the only place in that database holding `whatsmeow_*`
+tables. The migration runner checks for existing tables through
+`information_schema` without filtering by schema, so if `public` (or any other
+schema) already has them, startup either fails with
+`pq: relation "whatsmeow_version" does not exist (42P01)` or silently keeps
+writing to the old schema when `public` is in the `search_path` list. Point a
+schema-isolated instance at a database with no other `whatsmeow_*` tables, and
+give `DB_KEYS_URI` its own database rather than a second schema in the same one.
 
 **Documentation:**
 
@@ -634,6 +678,8 @@ You may also fork or modify the source code.
 | ✅       | Get Device Status                      | GET    | /devices/:device_id/status          |
 | ✅       | Get Device Webhook                     | GET    | /devices/:device_id/webhook         |
 | ✅       | Set Device Webhook                     | PATCH  | /devices/:device_id/webhook         |
+| ✅       | Get Device Storage Settings            | GET    | /devices/:device_id/settings        |
+| ✅       | Set Device Storage Settings            | PATCH  | /devices/:device_id/settings        |
 | ✅       | Log In with QR Code                    | GET    | /app/login                          |
 | ✅       | Log In with Pairing Code               | GET    | /app/login-with-code                |
 | ✅       | Passkey Pairing Status                 | GET    | /app/passkey                        |
@@ -677,6 +723,7 @@ You may also fork or modify the source code.
 | ✅       | Forward Message                        | POST   | /message/:message_id/forward        |
 | ✅       | Download Message Media                 | GET    | /message/:message_id/download       |
 | ✅       | Reject Call                            | POST   | /call/reject                        |
+| ✅       | Get Call Logs                          | GET    | /call/logs                          |
 | ✅       | Join Group with Link                   | POST   | /group/join-with-link               |
 | ✅       | Get Group Info from Link               | GET    | /group/info-from-link               |
 | ✅       | Get Group Info                         | GET    | /group/info                         |

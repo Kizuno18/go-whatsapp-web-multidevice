@@ -49,8 +49,10 @@ func handleHistorySync(ctx context.Context, evt *events.HistorySync, chatStorage
 
 	log.Infof("Wrote history sync to %s", fileName)
 
-	// Process history sync data to database
-	if chatStorageRepo != nil {
+	// Process history sync data to database. Skipped for devices with a chat_storage=false
+	// override, same as live messages in handleMessage — a device kept out of chat storage
+	// should not backfill history into it either.
+	if chatStorageRepo != nil && isChatStorageEnabledForClient(ctx, client) {
 		if err := processHistorySync(ctx, evt.Data, chatStorageRepo, client); err != nil {
 			log.Errorf("Failed to process history sync to database: %v", err)
 		}
@@ -294,10 +296,29 @@ func processConversationMessages(ctx context.Context, data *waHistorySync.Histor
 				EphemeralExpiration: ephemeralExpiration,
 			}
 
+			storeChat := true
+			if data.GetSyncType() == waHistorySync.HistorySync_ON_DEMAND {
+				// ON_DEMAND delivers messages older than the local anchor, so its
+				// batch timestamp must never move the chat's activity time backward
+				// or clobber flags (e.g. archived) that live history didn't touch.
+				// If the current state cannot be read, leave the chat row alone.
+				if existing, err := chatStorageRepo.GetChatByDevice(deviceID, chatJID); err != nil {
+					log.Warnf("Failed to load existing chat %s for on-demand merge, keeping stored metadata: %v", chatJID, err)
+					storeChat = false
+				} else if existing != nil {
+					if existing.LastMessageTime.After(chat.LastMessageTime) {
+						chat.LastMessageTime = existing.LastMessageTime
+					}
+					chat.Archived = existing.Archived
+				}
+			}
+
 			// Store or update the chat
-			if err := chatStorageRepo.StoreChat(chat); err != nil {
-				log.Warnf("Failed to store chat %s: %v", chatJID, err)
-				continue
+			if storeChat {
+				if err := chatStorageRepo.StoreChat(chat); err != nil {
+					log.Warnf("Failed to store chat %s: %v", chatJID, err)
+					continue
+				}
 			}
 
 			// Store messages in batch

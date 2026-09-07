@@ -99,17 +99,28 @@ func getContactMutex(phone string) *sync.Mutex {
 // successful targets still receive the event.
 func forwardPayloadToConfiguredWebhooks(ctx context.Context, payload map[string]any, eventName string) error {
 	deviceJID, _ := payload["device_id"].(string)
-	deviceADJID := addWebhookDeviceADJID(ctx, payload)
-	webhookConfig, err := getWebhookConfigForDevice(deviceJID, deviceADJID)
-	if err != nil {
+	if inst, ok := DeviceFromContext(ctx); ok && inst != nil {
+		if adJID := inst.ADJID(); adJID != "" {
+			payload["device_ad_jid"] = adJID
+		}
+	}
+	record, err := resolveWebhookDeviceRecord(ctx, payload)
+	recordResolutionFailed := err != nil
+	if recordResolutionFailed {
 		// A config lookup failure is not a delivery failure: fall back to the global
 		// webhook config so the event still reaches the global targets and Chatwoot.
 		logrus.Warnf("Failed to get webhook config for device %s, falling back to global config: %v", deviceJID, err)
-		webhookConfig = nil
+		record = nil
 	}
+	webhookConfig := webhookConfigFromRecord(record)
 
+	// A resolution failure hides whatever per-device WebhookIgnoreGroups the emitting
+	// slot has, including an explicit true. Falling back to the global config in that
+	// case would forward a group event the device meant to suppress, so fail closed for
+	// group events until the record is resolved; non-group events keep the fallback above.
 	webhookAllowed := isEventWhitelistedForDevice(eventName, webhookConfig) &&
-		!shouldIgnoreWebhookJID(payload)
+		!shouldIgnoreWebhookJID(payload, deviceIgnoreGroupsOverride(record)) &&
+		!(recordResolutionFailed && payloadIsGroupEvent(payload))
 	chatwootAllowed := config.ChatwootEnabled && shouldForwardEventToChatwoot(eventName) && isEventWhitelistedForChatwoot(eventName)
 
 	if !webhookAllowed && !chatwootAllowed {
@@ -160,54 +171,50 @@ func getDeviceRecordForTest(deviceJID string) (*domainChatStorage.DeviceRecord, 
 	return nil, nil
 }
 
-// getWebhookConfigForDevice returns the webhook configuration to use for a given device.
-// If the device has a custom webhook config, it returns that config.
-// Otherwise, it returns nil (caller should use global config).
-//
-// The AD JID (deviceADJID) is tried first: it pins the exact companion session, so
-// two devices sharing a bare phone number (see GetDeviceRecordByJID's ambiguity
-// guard, issue: two GOWA devices logged in with the same number both silently fell
-// back to the global config because the bare-JID lookup refused to pick a side)
-// resolve to their own distinct per-device record instead of both losing their
-// config to the ambiguity fallback. The bare JID (deviceJID) is only consulted when
-// no AD JID is available (e.g. older events built before the AD JID was threaded
-// through, or a device that has not completed a session handshake yet).
-func getWebhookConfigForDevice(deviceJID, deviceADJID string) (*domainChatStorage.DeviceWebhookConfig, error) {
-	if strings.TrimSpace(deviceADJID) != "" {
-		record, err := getDeviceRecordForTest(deviceADJID)
-		if err != nil {
-			return nil, fmt.Errorf("failed to get device record by ad jid: %w", err)
-		}
-		if record != nil {
-			return deviceWebhookConfigFromRecord(deviceADJID, record), nil
+// webhookConfigFromRecord maps a device registration onto its webhook configuration,
+// returning nil when the device has no device-specific webhook URL so the caller keeps
+// using the global config.
+func webhookConfigFromRecord(record *domainChatStorage.DeviceRecord) *domainChatStorage.DeviceWebhookConfig {
+	if record == nil || record.WebhookURL == nil || *record.WebhookURL == "" {
+		return nil
+	}
+	logrus.Debugf("Using device-specific webhook config for %s", record.DeviceID)
+	return &domainChatStorage.DeviceWebhookConfig{
+		WebhookURL:                record.WebhookURL,
+		WebhookSecret:             record.WebhookSecret,
+		WebhookEvents:             record.WebhookEvents,
+		WebhookInsecureSkipVerify: record.WebhookInsecureSkipVerify,
+		WebhookIgnoreGroups:       record.WebhookIgnoreGroups,
+	}
+}
+
+// resolveWebhookDeviceRecord resolves the registration of the slot that emitted the event.
+// The payload's device_id is the bare NonAD JID, which GetDeviceRecordByJID deliberately
+// refuses to resolve once several slots share one number (issue #760); the AD JID of the
+// slot carried in the event context addresses exactly one row, so try that first and only
+// fall back to the bare JID when the slot has no AD JID recorded yet.
+func resolveWebhookDeviceRecord(ctx context.Context, payload map[string]any) (*domainChatStorage.DeviceRecord, error) {
+	deviceJID, _ := payload["device_id"].(string)
+
+	if inst, ok := DeviceFromContext(ctx); ok && inst != nil {
+		if adJID := inst.ADJID(); adJID != "" && adJID != deviceJID {
+			record, err := getDeviceRecordForTest(adJID)
+			if err != nil {
+				logrus.Warnf("Failed to get device record for AD JID %s, falling back to %s: %v", adJID, deviceJID, err)
+			} else if record != nil {
+				return record, nil
+			}
 		}
 	}
 
 	if deviceJID == "" {
 		return nil, nil
 	}
-
 	record, err := getDeviceRecordForTest(deviceJID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get device record: %w", err)
 	}
-	return deviceWebhookConfigFromRecord(deviceJID, record), nil
-}
-
-// deviceWebhookConfigFromRecord builds the per-device webhook config from a
-// resolved device record, or returns nil when the record has no webhook URL
-// configured (the caller then falls back to the global webhook config).
-func deviceWebhookConfigFromRecord(logJID string, record *domainChatStorage.DeviceRecord) *domainChatStorage.DeviceWebhookConfig {
-	if record == nil || record.WebhookURL == nil || *record.WebhookURL == "" {
-		return nil
-	}
-	logrus.Debugf("Using device-specific webhook config for %s", logJID)
-	return &domainChatStorage.DeviceWebhookConfig{
-		WebhookURL:                record.WebhookURL,
-		WebhookSecret:             record.WebhookSecret,
-		WebhookEvents:             record.WebhookEvents,
-		WebhookInsecureSkipVerify: record.WebhookInsecureSkipVerify,
-	}
+	return record, nil
 }
 
 // getWebhookURLsFromConfig extracts webhook URLs from the config.
@@ -232,31 +239,80 @@ func isEventWhitelistedForDevice(eventName string, deviceConfig *domainChatStora
 	return len(config.WhatsappWebhookEvents) == 0 || isEventWhitelisted(eventName)
 }
 
-// shouldIgnoreWebhookJID reports whether an event should be skipped for WHATSAPP_WEBHOOK
-// forwarding because its chat or sender JID matches WHATSAPP_WEBHOOK_IGNORE_JIDS (e.g. the
-// "@g.us" wildcard to drop all group traffic). The JID fields live in the nested inner
-// payload, so it descends one level. Both the resolved phone JIDs (chat_id/from) and the
-// LID forms (chat_lid/from_lid) are matched: a LID-migrated event keeps the @lid JID in the
-// *_lid fields while chat_id/from hold the resolved phone JID, so an "@lid" pattern (or an
-// exact ...@lid) only matches via the *_lid fields. It is a no-op when the ignore list is
-// empty, the inner payload is absent, or no JID matches — so events without a JID and the
-// default (no list configured) keep forwarding unchanged. This only gates the generic
-// webhook; the Chatwoot path keeps its own CHATWOOT_IGNORE_JIDS filter.
-func shouldIgnoreWebhookJID(payload map[string]any) bool {
-	ignore := config.WhatsappWebhookIgnoreJids
-	if len(ignore) == 0 {
-		return false
-	}
+// payloadIsGroupEvent reports whether the event's chat or sender JID (checked in the same
+// nested payload fields as shouldIgnoreWebhookJID: chat_id/from and their LID forms
+// chat_lid/from_lid) is a group JID ("@g.us"). It is used to fail closed on the generic
+// webhook when the device record couldn't be resolved, independent of any ignore-list logic.
+func payloadIsGroupEvent(payload map[string]any) bool {
 	data, ok := payload["payload"].(map[string]any)
 	if !ok {
 		return false
 	}
 	for _, key := range []string{"chat_id", "from", "chat_lid", "from_lid"} {
-		if jid, _ := data[key].(string); utils.MatchesIgnoredJID(jid, ignore) {
+		if jid, _ := data[key].(string); strings.HasSuffix(jid, "@g.us") {
 			return true
 		}
 	}
 	return false
+}
+
+// shouldIgnoreWebhookJID reports whether an event should be skipped for WHATSAPP_WEBHOOK
+// forwarding because its chat or sender JID matches WHATSAPP_WEBHOOK_IGNORE_JIDS (e.g. the
+// "@g.us" wildcard to drop all group traffic), OR because the originating device has an
+// explicit per-device override for group messages (webhook_ignore_groups, set via
+// PATCH /devices/:device_id/webhook, passed in as groupOverride). The device override
+// takes precedence over the global "@g.us" wildcard specifically for group JIDs -- but
+// only over that wildcard: a group listed by its exact JID stays ignored either way. The
+// override has no effect on non-group JIDs, where the global list remains the only
+// mechanism (unchanged from before this feature).
+// The JID fields live in the nested inner payload, so it descends one level. Both the
+// resolved phone JIDs (chat_id/from) and the LID forms (chat_lid/from_lid) are matched.
+// It is a no-op when the inner payload is absent or no JID matches.
+func shouldIgnoreWebhookJID(payload map[string]any, groupOverride *bool) bool {
+	data, ok := payload["payload"].(map[string]any)
+	if !ok {
+		return false
+	}
+
+	ignore := config.WhatsappWebhookIgnoreJids
+
+	for _, key := range []string{"chat_id", "from", "chat_lid", "from_lid"} {
+		jid, _ := data[key].(string)
+		if jid == "" {
+			continue
+		}
+		if strings.HasSuffix(jid, "@g.us") {
+			if groupOverride != nil {
+				if *groupOverride {
+					return true
+				}
+				// Opting out only neutralizes the "@g.us" wildcard: a group the
+				// operator listed by its exact JID stays ignored.
+				if utils.MatchesExactIgnoredJID(jid, ignore) {
+					return true
+				}
+				continue
+			}
+			if utils.MatchesIgnoredJID(jid, ignore) {
+				return true
+			}
+			continue
+		}
+		if utils.MatchesIgnoredJID(jid, ignore) {
+			return true
+		}
+	}
+	return false
+}
+
+// deviceIgnoreGroupsOverride returns the per-device override for ignoring group messages
+// in webhook forwarding (webhook_ignore_groups), or nil when the device has never set it
+// -- the caller falls back to the global "@g.us" wildcard.
+func deviceIgnoreGroupsOverride(record *domainChatStorage.DeviceRecord) *bool {
+	if record == nil {
+		return nil
+	}
+	return record.WebhookIgnoreGroups
 }
 
 // addWebhookSessionID injects the operator-facing session id into a webhook
@@ -275,28 +331,6 @@ func addWebhookSessionID(payload map[string]any) {
 	if sessionID := sessionIDForJIDFn(jid); sessionID != "" {
 		payload["session_id"] = sessionID
 	}
-}
-
-// addWebhookDeviceADJID stamps the payload with the full AD JID
-// (number:NN@s.whatsapp.net) of the device instance attached to ctx, under the
-// new "device_ad_jid" field, and returns that value. device_id is left
-// untouched (external consumers key on it as the bare JID). Returns "" without
-// touching the payload when ctx carries no device instance or the instance has
-// no AD JID yet (e.g. not connected), so callers fall back to the
-// (possibly-ambiguous) bare-JID lookup.
-func addWebhookDeviceADJID(ctx context.Context, payload map[string]any) string {
-	instance, ok := DeviceFromContext(ctx)
-	if !ok || instance == nil {
-		return ""
-	}
-	adJID := instance.ADJID()
-	if adJID == "" {
-		return ""
-	}
-	if payload != nil {
-		payload["device_ad_jid"] = adJID
-	}
-	return adJID
 }
 
 // sessionIDForJID resolves the session id registered via POST /devices for a
@@ -1371,9 +1405,102 @@ func forwardToChatwoot(ctx context.Context, payload map[string]any, eventName st
 	}
 }
 
+// maxChatwootReopenRetryWindow bounds how long a queued reopen keeps chasing a
+// conversation. The intent argues that a resolve is stale; a day after the sync
+// that posted, a still-resolved thread is far likelier to have been resolved on
+// purpose than to be waiting on a Chatwoot that has been down the whole time,
+// and reopening it then would be the regression this path exists to avoid. A
+// later sync that posts and fails to reopen again rewrites the row's payload,
+// so a genuinely stuck thread gets a fresh window rather than one that expires.
+const maxChatwootReopenRetryWindow = 24 * time.Hour
+
+// reopenIntentActivityGrace absorbs clock skew between this host and the
+// Chatwoot server when comparing their timestamps.
+const reopenIntentActivityGrace = time.Minute
+
+// replayChatwootReopenIntent finishes a history-sync reopen that failed after
+// its messages had already been posted and linked. It never posts anything: the
+// queued row holds a conversation, not a message.
+//
+// The intent is dropped (marked done) rather than retried whenever retrying
+// cannot help or would be wrong: reopening turned off, the device no longer
+// pointing at the account the intent was queued for, a conversation that is
+// already open, one whose newer activity means the resolve is no longer the one
+// the sync raced, a permanent Chatwoot rejection, or an expired window.
+func replayChatwootReopenIntent(event *domainChatStorage.ChatwootForwardEvent) error {
+	var intent chatwoot.ReopenIntent
+	if err := json.Unmarshal([]byte(event.PayloadJSON), &intent); err != nil {
+		return fmt.Errorf("decode reopen intent %d: %w", event.ID, err)
+	}
+	if intent.ConversationID == 0 || intent.EnqueuedAt <= 0 {
+		logrus.Errorf("Chatwoot: dropping malformed reopen intent %d (conversation=%d enqueued_at=%d)", event.ID, intent.ConversationID, intent.EnqueuedAt)
+		return nil
+	}
+	if !config.ChatwootReopenConversation {
+		logrus.Infof("Chatwoot: dropping reopen intent for conversation %d; reopening is disabled", intent.ConversationID)
+		return nil
+	}
+	enqueuedAt := time.Unix(intent.EnqueuedAt, 0)
+	if time.Since(enqueuedAt) > maxChatwootReopenRetryWindow {
+		logrus.Errorf("Chatwoot: giving up on reopening conversation %d for %s, queued %s ago; it stays resolved with new messages inside", intent.ConversationID, intent.ChatJID, time.Since(enqueuedAt).Round(time.Minute))
+		return nil
+	}
+
+	resolved, err := getChatwootClientFn(event.DeviceID)
+	if err != nil {
+		return err
+	}
+	if resolved == nil || resolved.Client == nil || !resolved.Client.IsConfigured() {
+		logrus.Warnf("Chatwoot: dropping reopen intent for conversation %d; device %s has no Chatwoot config", intent.ConversationID, event.DeviceID)
+		return nil
+	}
+	cw := resolved.Client
+	if intent.AccountID != 0 && intent.AccountID != cw.AccountID {
+		logrus.Warnf("Chatwoot: dropping reopen intent for conversation %d; it was queued for account %d and device %s now points at %d", intent.ConversationID, intent.AccountID, event.DeviceID, cw.AccountID)
+		return nil
+	}
+
+	state, err := cw.GetConversationState(intent.ConversationID)
+	if err != nil {
+		if !chatwoot.Retryable(err) {
+			logrus.Errorf("Chatwoot: dropping reopen intent for conversation %d: %v", intent.ConversationID, err)
+			return nil
+		}
+		return err
+	}
+	if state.Status != "resolved" {
+		logrus.Debugf("Chatwoot: conversation %d is already %s; reopen intent satisfied", intent.ConversationID, state.Status)
+		return nil
+	}
+	// Still resolved, but not necessarily by the resolve this intent argues
+	// with: activity newer than the intent means the thread was opened and
+	// resolved again since, and that decision is the current one.
+	if state.LastActivityAt.After(enqueuedAt.Add(reopenIntentActivityGrace)) {
+		logrus.Infof("Chatwoot: dropping reopen intent for conversation %d; it was resolved again after activity at %s", intent.ConversationID, state.LastActivityAt.Format(time.RFC3339))
+		return nil
+	}
+
+	target := intent.TargetStatus
+	if target == "" {
+		target = "open"
+	}
+	if err := cw.ToggleConversationStatus(intent.ConversationID, target); err != nil {
+		if !chatwoot.Retryable(err) {
+			logrus.Errorf("Chatwoot: dropping reopen intent for conversation %d: %v", intent.ConversationID, err)
+			return nil
+		}
+		return err
+	}
+	logrus.Infof("Chatwoot: reopened conversation %d for %s from the retry queue", intent.ConversationID, intent.ChatJID)
+	return nil
+}
+
 func processChatwootForwardRetryEvent(repo domainChatStorage.IChatStorageRepository, event *domainChatStorage.ChatwootForwardEvent) error {
 	if event == nil {
 		return nil
+	}
+	if event.EventName == chatwoot.ReopenForwardEventName {
+		return replayChatwootReopenIntent(event)
 	}
 	var payload map[string]any
 	if err := json.Unmarshal([]byte(event.PayloadJSON), &payload); err != nil {

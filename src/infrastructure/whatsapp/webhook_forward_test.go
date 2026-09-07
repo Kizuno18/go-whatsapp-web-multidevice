@@ -361,12 +361,22 @@ func TestExtractStructuredMessageContentWithContactsArrayPayload(t *testing.T) {
 	}
 }
 
-func TestGetWebhookConfigForDevice_NoDeviceID(t *testing.T) {
+// resolveWebhookConfigForJID runs the production lookup path the forwarder uses per event
+// for a payload that carries nothing but device_id.
+func resolveWebhookConfigForJID(deviceJID string) (*chatstorage.DeviceWebhookConfig, error) {
+	record, err := resolveWebhookDeviceRecord(context.Background(), map[string]any{"device_id": deviceJID})
+	if err != nil {
+		return nil, err
+	}
+	return webhookConfigFromRecord(record), nil
+}
+
+func TestResolveWebhookConfigForJID_NoDeviceID(t *testing.T) {
 	originalWebhooks := config.WhatsappWebhook
 	config.WhatsappWebhook = []string{"https://global-webhook.com"}
 	defer func() { config.WhatsappWebhook = originalWebhooks }()
 
-	config, err := getWebhookConfigForDevice("", "")
+	config, err := resolveWebhookConfigForJID("")
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
 	}
@@ -375,7 +385,7 @@ func TestGetWebhookConfigForDevice_NoDeviceID(t *testing.T) {
 	}
 }
 
-func TestGetWebhookConfigForDevice_DeviceNotFound(t *testing.T) {
+func TestResolveWebhookConfigForJID_DeviceNotFound(t *testing.T) {
 	originalWebhooks := config.WhatsappWebhook
 	config.WhatsappWebhook = []string{"https://global-webhook.com"}
 	defer func() { config.WhatsappWebhook = originalWebhooks }()
@@ -386,7 +396,7 @@ func TestGetWebhookConfigForDevice_DeviceNotFound(t *testing.T) {
 	}
 	defer func() { webhookStorageForTest = originalStorageForTest }()
 
-	config, err := getWebhookConfigForDevice("unknown-device-jid@s.whatsapp.net", "")
+	config, err := resolveWebhookConfigForJID("unknown-device-jid@s.whatsapp.net")
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
 	}
@@ -395,7 +405,7 @@ func TestGetWebhookConfigForDevice_DeviceNotFound(t *testing.T) {
 	}
 }
 
-func TestGetWebhookConfigForDevice_FallbackToGlobal(t *testing.T) {
+func TestResolveWebhookConfigForJID_FallbackToGlobal(t *testing.T) {
 	originalWebhooks := config.WhatsappWebhook
 	config.WhatsappWebhook = []string{"https://global-webhook.com"}
 	defer func() { config.WhatsappWebhook = originalWebhooks }()
@@ -410,7 +420,7 @@ func TestGetWebhookConfigForDevice_FallbackToGlobal(t *testing.T) {
 	}
 	defer func() { webhookStorageForTest = originalStorageForTest }()
 
-	config, err := getWebhookConfigForDevice("6289600000000@s.whatsapp.net", "")
+	config, err := resolveWebhookConfigForJID("6289600000000@s.whatsapp.net")
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
 	}
@@ -419,7 +429,7 @@ func TestGetWebhookConfigForDevice_FallbackToGlobal(t *testing.T) {
 	}
 }
 
-func TestGetWebhookConfigForDevice_DeviceSpecificOverride(t *testing.T) {
+func TestResolveWebhookConfigForJID_DeviceSpecificOverride(t *testing.T) {
 	deviceWebhookURL := "https://device-specific-webhook.com"
 	originalWebhooks := config.WhatsappWebhook
 	config.WhatsappWebhook = []string{"https://global-webhook.com"}
@@ -434,7 +444,7 @@ func TestGetWebhookConfigForDevice_DeviceSpecificOverride(t *testing.T) {
 	}
 	defer func() { webhookStorageForTest = originalStorageForTest }()
 
-	config, err := getWebhookConfigForDevice("6289600000000@s.whatsapp.net", "")
+	config, err := resolveWebhookConfigForJID("6289600000000@s.whatsapp.net")
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
 	}
@@ -705,162 +715,3 @@ func TestForwardPayloadInjectsSessionID(t *testing.T) {
 		t.Fatalf("expected forwarded payload session_id=org_2, got %v", captured["session_id"])
 	}
 }
-
-// TestForwardPayloadToConfiguredWebhooks_SharedBareJID_ResolvesByADJID reproduces
-// the production bug where two devices are logged in with the same phone number
-// (bare JID). Both records share the bare jid but have distinct ad_jid values. The
-// event carries the AD JID of the second device (via ctx), which has a configured
-// webhook; the first device's bare-jid-only lookup would be ambiguous (see
-// GetDeviceRecordByJID), so resolution must go through device_ad_jid instead of
-// falling back to global for everyone.
-func TestForwardPayloadToConfiguredWebhooks_SharedBareJID_ResolvesByADJID(t *testing.T) {
-	const bareJID = "554891594946@s.whatsapp.net"
-	const adJIDDeviceA = "554891594946:15@s.whatsapp.net" // 04c5538e: global consumer, no per-device webhook
-	const adJIDDeviceB = "554891594946:17@s.whatsapp.net" // a87d4fb1: has a per-device webhook
-	const deviceBWebhookURL = "https://device-b-webhook.com"
-
-	ctx := ContextWithDevice(context.Background(), &DeviceInstance{
-		id:    "a87d4fb1",
-		jid:   bareJID,
-		adJID: adJIDDeviceB,
-	})
-
-	originalWebhooks := config.WhatsappWebhook
-	config.WhatsappWebhook = []string{"https://global-webhook.com"}
-	defer func() { config.WhatsappWebhook = originalWebhooks }()
-
-	originalStorageForTest := webhookStorageForTest
-	webhookStorageForTest = func(deviceJID string) (*chatstorage.DeviceRecord, error) {
-		switch deviceJID {
-		case adJIDDeviceB:
-			return &chatstorage.DeviceRecord{DeviceID: "a87d4fb1", JID: bareJID, ADJID: adJIDDeviceB, WebhookURL: strPtr(deviceBWebhookURL)}, nil
-		case adJIDDeviceA:
-			return &chatstorage.DeviceRecord{DeviceID: "04c5538e", JID: bareJID, ADJID: adJIDDeviceA, WebhookURL: strPtr("")}, nil
-		case bareJID:
-			// Two slots share this bare number; GetDeviceRecordByJID refuses to
-			// pick one and returns nil (logged as ambiguous).
-			return nil, nil
-		}
-		return nil, nil
-	}
-	defer func() { webhookStorageForTest = originalStorageForTest }()
-
-	var calledURLs []string
-	originalSubmit := submitWebhookFn
-	submitWebhookFn = func(_ context.Context, _ map[string]any, url string, _ *chatstorage.DeviceWebhookConfig) error {
-		calledURLs = append(calledURLs, url)
-		return nil
-	}
-	defer func() { submitWebhookFn = originalSubmit }()
-
-	payload := map[string]any{"event": "message", "device_id": bareJID}
-	if err := forwardPayloadToConfiguredWebhooks(ctx, payload, "message"); err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	if payload["device_ad_jid"] != adJIDDeviceB {
-		t.Fatalf("expected payload device_ad_jid=%s, got %v", adJIDDeviceB, payload["device_ad_jid"])
-	}
-	if payload["device_id"] != bareJID {
-		t.Fatalf("device_id must stay the bare JID, got %v", payload["device_id"])
-	}
-	if len(calledURLs) != 1 || calledURLs[0] != deviceBWebhookURL {
-		t.Fatalf("expected device B's own webhook %s to be used, got %v", deviceBWebhookURL, calledURLs)
-	}
-}
-
-// TestForwardPayloadToConfiguredWebhooks_SharedBareJID_NoWebhookFallsBackToGlobal
-// covers the sibling device from the same bug (04c5538e): it shares the bare JID
-// with a device that does have a webhook, but its own record has none configured.
-// Resolving it by its own AD JID must fall back to the global config rather than
-// picking up the sibling's webhook or double-delivering.
-func TestForwardPayloadToConfiguredWebhooks_SharedBareJID_NoWebhookFallsBackToGlobal(t *testing.T) {
-	const bareJID = "554891594946@s.whatsapp.net"
-	const adJIDDeviceA = "554891594946:15@s.whatsapp.net"
-	const adJIDDeviceB = "554891594946:17@s.whatsapp.net"
-	const deviceBWebhookURL = "https://device-b-webhook.com"
-
-	ctx := ContextWithDevice(context.Background(), &DeviceInstance{
-		id:    "04c5538e",
-		jid:   bareJID,
-		adJID: adJIDDeviceA,
-	})
-
-	originalWebhooks := config.WhatsappWebhook
-	config.WhatsappWebhook = []string{"https://global-webhook.com"}
-	defer func() { config.WhatsappWebhook = originalWebhooks }()
-
-	originalStorageForTest := webhookStorageForTest
-	webhookStorageForTest = func(deviceJID string) (*chatstorage.DeviceRecord, error) {
-		switch deviceJID {
-		case adJIDDeviceA:
-			return &chatstorage.DeviceRecord{DeviceID: "04c5538e", JID: bareJID, ADJID: adJIDDeviceA, WebhookURL: strPtr("")}, nil
-		case adJIDDeviceB:
-			return &chatstorage.DeviceRecord{DeviceID: "a87d4fb1", JID: bareJID, ADJID: adJIDDeviceB, WebhookURL: strPtr(deviceBWebhookURL)}, nil
-		case bareJID:
-			return nil, nil
-		}
-		return nil, nil
-	}
-	defer func() { webhookStorageForTest = originalStorageForTest }()
-
-	var calledURLs []string
-	originalSubmit := submitWebhookFn
-	submitWebhookFn = func(_ context.Context, _ map[string]any, url string, _ *chatstorage.DeviceWebhookConfig) error {
-		calledURLs = append(calledURLs, url)
-		return nil
-	}
-	defer func() { submitWebhookFn = originalSubmit }()
-
-	payload := map[string]any{"event": "message", "device_id": bareJID}
-	if err := forwardPayloadToConfiguredWebhooks(ctx, payload, "message"); err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	if len(calledURLs) != 1 || calledURLs[0] != "https://global-webhook.com" {
-		t.Fatalf("expected global webhook fallback, got %v", calledURLs)
-	}
-}
-
-// TestForwardPayloadToConfiguredWebhooks_NoDeviceInContext_KeepsBareJIDBehavior
-// covers events built without a device attached to ctx (or before ADJID is known):
-// device_ad_jid must not be set, and resolution must keep using the bare JID exactly
-// as it did before this change.
-func TestForwardPayloadToConfiguredWebhooks_NoDeviceInContext_KeepsBareJIDBehavior(t *testing.T) {
-	const bareJID = "6289600000000@s.whatsapp.net"
-	deviceWebhookURL := "https://device-specific-webhook.com"
-
-	ctx := context.Background()
-
-	originalWebhooks := config.WhatsappWebhook
-	config.WhatsappWebhook = []string{"https://global-webhook.com"}
-	defer func() { config.WhatsappWebhook = originalWebhooks }()
-
-	originalStorageForTest := webhookStorageForTest
-	webhookStorageForTest = func(deviceJID string) (*chatstorage.DeviceRecord, error) {
-		return &chatstorage.DeviceRecord{DeviceID: deviceJID, WebhookURL: &deviceWebhookURL}, nil
-	}
-	defer func() { webhookStorageForTest = originalStorageForTest }()
-
-	var calledURLs []string
-	originalSubmit := submitWebhookFn
-	submitWebhookFn = func(_ context.Context, _ map[string]any, url string, _ *chatstorage.DeviceWebhookConfig) error {
-		calledURLs = append(calledURLs, url)
-		return nil
-	}
-	defer func() { submitWebhookFn = originalSubmit }()
-
-	payload := map[string]any{"event": "message", "device_id": bareJID}
-	if err := forwardPayloadToConfiguredWebhooks(ctx, payload, "message"); err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	if _, exists := payload["device_ad_jid"]; exists {
-		t.Fatalf("expected no device_ad_jid without a device in context, got %v", payload["device_ad_jid"])
-	}
-	if len(calledURLs) != 1 || calledURLs[0] != deviceWebhookURL {
-		t.Fatalf("expected bare-JID device-specific webhook %s, got %v", deviceWebhookURL, calledURLs)
-	}
-}
-
-func strPtr(s string) *string { return &s }

@@ -36,6 +36,8 @@ type IChatStorageRepository interface {
 	// when the chat has no stored messages.
 	GetOldestMessageByDevice(deviceID, chatJID string) (*Message, error)
 	SearchMessages(deviceID, chatJID, searchText string, limit int) ([]*Message, error) // Database-level search with device isolation
+	// GetCallRecords lists call records (media_type "call") newest first, plus the unpaginated total.
+	GetCallRecords(filter *CallRecordFilter) ([]*Message, int64, error)
 	DeleteMessage(id, chatJID string) error
 	DeleteMessageByDevice(deviceID, id, chatJID string) error
 	StoreSentMessageWithContext(ctx context.Context, messageID string, senderJID string, recipientJID string, content string, timestamp time.Time, msg *waE2E.Message) error
@@ -123,6 +125,16 @@ type IChatStorageRepository interface {
 	SetDeviceWebhookConfig(deviceID string, config *DeviceWebhookConfig) error
 	// GetDeviceWebhookConfig retrieves the full webhook configuration for a device.
 	GetDeviceWebhookConfig(deviceID string) (*DeviceWebhookConfig, error)
+	// SetDeviceStorageSettings applies a partial update to the per-device
+	// chat_storage / auto_download_media overrides. Only the fields flagged as
+	// present in patch are touched.
+	SetDeviceStorageSettings(deviceID string, patch DeviceStoragePatch) error
+	// GetDeviceStorageSettings retrieves the per-device chat_storage /
+	// auto_download_media overrides. Returns (nil, nil) if the device does not
+	// exist. For an existing device, always returns a non-nil
+	// *DeviceStorageSettings; ChatStorage/AutoDownloadMedia are nil fields on it
+	// when no override is set for that field.
+	GetDeviceStorageSettings(deviceID string) (*DeviceStorageSettings, error)
 
 	// Schema operations
 	InitializeSchema() error
