@@ -53,8 +53,8 @@ var (
 	WhatsappAutoRejectCall                     = false // Auto-reject incoming calls
 	WhatsappLogLevel                           = "ERROR"
 	WhatsappSettingMaxImageSize       int64    = 20000000  // 20MB
-	WhatsappSettingMaxFileSize        int64    = 50000000  // 50MB
-	WhatsappSettingMaxVideoSize       int64    = 100000000 // 100MB
+	WhatsappSettingMaxFileSize        int64    = 600000000 // 600MB (raised for large staff bundles)
+	WhatsappSettingMaxVideoSize       int64    = 600000000 // 600MB (raised: fiber BodyLimit)
 	WhatsappSettingMaxDownloadSize    int64    = 500000000 // 500MB
 	WhatsappTypeUser                           = "@s.whatsapp.net"
 	WhatsappTypeGroup                          = "@g.us"
