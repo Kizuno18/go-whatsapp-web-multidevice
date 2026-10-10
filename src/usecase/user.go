@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"image"
+	"strings"
 	"sync"
 	"time"
 
@@ -395,8 +396,36 @@ func (service serviceUser) IsOnWhatsApp(ctx context.Context, request domainUser.
 
 	utils.SanitizePhone(&request.Phone)
 
-	response.IsOnWhatsApp = utils.IsOnWhatsapp(client, request.Phone)
+	jid, err := utils.ParseJID(request.Phone)
+	if err != nil || jid.Server != types.DefaultUserServer {
+		return response, pkgError.InvalidJID("A phone number is required")
+	}
+	lookupCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	return checkRegisteredUser(lookupCtx, "+"+strings.TrimPrefix(jid.User, "+"), client.IsOnWhatsApp)
+}
 
+func checkRegisteredUser(ctx context.Context, phone string, lookup func(context.Context, []string) ([]types.IsOnWhatsAppResponse, error)) (domainUser.CheckResponse, error) {
+	var response domainUser.CheckResponse
+	rows, err := lookup(ctx, []string{phone})
+	if err != nil {
+		return response, pkgError.InternalServerError("WhatsApp identity lookup unavailable")
+	}
+	if len(rows) != 1 || strings.TrimPrefix(rows[0].Query, "+") != strings.TrimPrefix(phone, "+") {
+		return response, pkgError.InternalServerError("WhatsApp identity lookup returned an invalid result")
+	}
+	if !rows[0].IsIn {
+		return response, nil
+	}
+	jid := rows[0].PhoneNumber.ToNonAD()
+	if jid.Server != types.DefaultUserServer {
+		jid = rows[0].JID.ToNonAD()
+	}
+	if jid.Server != types.DefaultUserServer || jid.User == "" || strings.Trim(jid.User, "0123456789") != "" {
+		return response, pkgError.InternalServerError("WhatsApp identity lookup returned an invalid recipient")
+	}
+	response.IsOnWhatsApp = true
+	response.RegisteredJID = jid.String()
 	return response, nil
 }
 

@@ -5465,6 +5465,10 @@ components:
             is_on_whatsapp:
               type: boolean
               example: true
+            registered_jid:
+              type: string
+              description: Canonical phone JID returned by WhatsApp for a registered number. Omitted for unregistered numbers. Lookup failures return an error instead of false.
+              example: "628123456789@s.whatsapp.net"
     BusinessProfileResponse:
       type: object
       properties:
