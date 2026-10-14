@@ -29,9 +29,11 @@ type ParticipantRequest struct {
 }
 
 type ParticipantStatus struct {
-	Participant string `json:"participant"`
-	Status      string `json:"status"`
-	Message     string `json:"message"`
+	Participant    string `json:"participant"`
+	Status         string `json:"status"`
+	Message        string `json:"message"`
+	ErrorCode      int    `json:"error_code"`
+	RequiresInvite bool   `json:"requires_invite"`
 }
 
 type GetGroupParticipantsRequest struct {
