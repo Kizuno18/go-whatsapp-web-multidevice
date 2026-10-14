@@ -4497,6 +4497,14 @@ components:
               message:
                 type: string
                 example: Participant added
+              error_code:
+                type: integer
+                description: Upstream participant error code; zero means no reported error, not proof of membership.
+                example: 403
+              requires_invite:
+                type: boolean
+                description: True only when the upstream participant response contains an add request. Invite tokens are not returned.
+                example: true
     GroupParticipantsResponse:
       type: object
       additionalProperties: false

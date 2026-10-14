@@ -146,23 +146,26 @@ func (service serviceGroup) ManageParticipant(ctx context.Context, request domai
 		return result, err
 	}
 
-	for _, participant := range participants {
-		if participant.Error == 403 && participant.AddRequest != nil {
-			result = append(result, domainGroup.ParticipantStatus{
-				Participant: participant.JID.String(),
-				Status:      "error",
-				Message:     "Failed to add participant",
-			})
-		} else {
-			result = append(result, domainGroup.ParticipantStatus{
-				Participant: participant.JID.String(),
-				Status:      "success",
-				Message:     "Action success",
-			})
-		}
-	}
+	return participantStatuses(participants), nil
+}
 
-	return result, nil
+func participantStatuses(participants []types.GroupParticipant) []domainGroup.ParticipantStatus {
+	result := make([]domainGroup.ParticipantStatus, 0, len(participants))
+	for _, participant := range participants {
+		status := domainGroup.ParticipantStatus{
+			Participant:    participant.JID.String(),
+			Status:         "success",
+			Message:        "Action success",
+			ErrorCode:      participant.Error,
+			RequiresInvite: participant.AddRequest != nil,
+		}
+		if participant.Error != 0 {
+			status.Status = "error"
+			status.Message = "Failed to add participant"
+		}
+		result = append(result, status)
+	}
+	return result
 }
 
 func (service serviceGroup) GetGroupParticipants(ctx context.Context, request domainGroup.GetGroupParticipantsRequest) (response domainGroup.GetGroupParticipantsResponse, err error) {
