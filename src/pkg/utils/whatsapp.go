@@ -9,13 +9,11 @@ import (
 	"fmt"
 	"mime"
 	"net/url"
-	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/sirupsen/logrus"
 	"go.mau.fi/whatsmeow/proto/waE2E"
 	"go.mau.fi/whatsmeow/types"
@@ -25,6 +23,7 @@ import (
 	"github.com/aldinokemal/go-whatsapp-web-multidevice/config"
 	domainChatStorage "github.com/aldinokemal/go-whatsapp-web-multidevice/domains/chatstorage"
 	pkgError "github.com/aldinokemal/go-whatsapp-web-multidevice/pkg/error"
+	"github.com/aldinokemal/go-whatsapp-web-multidevice/pkg/mediastore"
 	"go.mau.fi/whatsmeow"
 )
 
@@ -1006,17 +1005,10 @@ func ExtractMedia(ctx context.Context, client *whatsmeow.Client, storageLocation
 		logrus.Info("Skip download because data is nil")
 		return extractedMedia, nil
 	}
-
-	data, err := client.Download(ctx, mediaFile)
-	if err != nil {
-		return extractedMedia, err
+	if client == nil || client.Store == nil || client.Store.ID == nil {
+		return extractedMedia, errors.New("media storage requires a logged-in account")
 	}
-
-	// Validate file size before writing to disk
-	maxFileSize := config.WhatsappSettingMaxDownloadSize
-	if int64(len(data)) > maxFileSize {
-		return extractedMedia, fmt.Errorf("file size exceeds the maximum limit of %d bytes", maxFileSize)
-	}
+	account := client.Store.ID.ToNonAD().String()
 
 	var originalFilename string
 
@@ -1039,8 +1031,33 @@ func ExtractMedia(ctx context.Context, client *whatsmeow.Client, storageLocation
 
 	extension := determineMediaExtension(originalFilename, extractedMedia.MimeType)
 
-	extractedMedia.MediaPath = fmt.Sprintf("%s/%d-%s%s", storageLocation, time.Now().Unix(), uuid.NewString(), extension)
-	err = os.WriteFile(extractedMedia.MediaPath, data, 0600)
+	if metadata, ok := mediaFile.(interface {
+		GetFileSHA256() []byte
+		GetFileLength() uint64
+	}); ok {
+		path, found, lookupErr := mediastore.Find(storageLocation, account, extension, metadata.GetFileSHA256(), metadata.GetFileLength())
+		if lookupErr != nil {
+			return extractedMedia, lookupErr
+		}
+		if found {
+			extractedMedia.MediaPath = path
+			return extractedMedia, nil
+		}
+	}
+	data, err := client.Download(ctx, mediaFile)
+	if err != nil {
+		return extractedMedia, err
+	}
+	maxFileSize := config.WhatsappSettingMaxDownloadSize
+	if int64(len(data)) > maxFileSize {
+		return extractedMedia, fmt.Errorf("file size exceeds the maximum limit of %d bytes", maxFileSize)
+	}
+
+	extractedMedia.MediaPath, err = mediastore.Write(storageLocation, account, extension, data, mediastore.Limits{
+		AccountBytes: config.MediaMaxAccountBytes,
+		TotalBytes:   config.MediaMaxTotalBytes,
+		MinFreeBytes: config.MediaMinFreeBytes,
+	})
 	if err != nil {
 		return extractedMedia, err
 	}

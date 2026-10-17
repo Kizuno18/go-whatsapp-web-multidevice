@@ -43,8 +43,11 @@ var (
 	DBKeysURI = ""
 
 	WhatsappAutoReplyMessage          string
-	WhatsappAutoMarkRead              = false // Auto-mark incoming messages as read
-	WhatsappAutoDownloadMedia         = true  // Auto-download media from incoming messages
+	WhatsappAutoMarkRead                    = false // Auto-mark incoming messages as read
+	WhatsappAutoDownloadMedia               = true  // Auto-download media from incoming messages
+	MediaMaxAccountBytes              int64 = 0
+	MediaMaxTotalBytes                int64 = 0
+	MediaMinFreeBytes                 int64 = 0
 	WhatsappWebhook                   []string
 	WhatsappWebhookSecret             = "secret"
 	WhatsappWebhookInsecureSkipVerify = false          // Skip TLS certificate verification for webhooks (insecure)
