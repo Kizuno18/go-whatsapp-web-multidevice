@@ -160,6 +160,15 @@ func initEnvConfig() {
 	if viper.IsSet("whatsapp_auto_download_media") {
 		config.WhatsappAutoDownloadMedia = viper.GetBool("whatsapp_auto_download_media")
 	}
+	if viper.IsSet("whatsapp_media_max_account_bytes") {
+		config.MediaMaxAccountBytes = viper.GetInt64("whatsapp_media_max_account_bytes")
+	}
+	if viper.IsSet("whatsapp_media_max_total_bytes") {
+		config.MediaMaxTotalBytes = viper.GetInt64("whatsapp_media_max_total_bytes")
+	}
+	if viper.IsSet("whatsapp_media_min_free_bytes") {
+		config.MediaMinFreeBytes = viper.GetInt64("whatsapp_media_min_free_bytes")
+	}
 	if envWebhook := viper.GetString("whatsapp_webhook"); envWebhook != "" {
 		webhook := strings.Split(envWebhook, ",")
 		config.WhatsappWebhook = webhook
@@ -426,6 +435,9 @@ func initFlags() {
 		config.WhatsappAutoDownloadMedia,
 		`auto download media from incoming messages --auto-download-media <true/false> | example: --auto-download-media=false`,
 	)
+	rootCmd.PersistentFlags().Int64Var(&config.MediaMaxAccountBytes, "media-max-account-bytes", 0, "Maximum cached media bytes per WhatsApp account; 0 disables the limit")
+	rootCmd.PersistentFlags().Int64Var(&config.MediaMaxTotalBytes, "media-max-total-bytes", 0, "Maximum total cached media bytes, including legacy files; 0 disables the limit")
+	rootCmd.PersistentFlags().Int64Var(&config.MediaMinFreeBytes, "media-min-free-bytes", 0, "Minimum filesystem space remaining after a media write; 0 disables the reserve")
 	rootCmd.PersistentFlags().StringSliceVarP(
 		&config.WhatsappWebhook,
 		"webhook", "w",

@@ -154,6 +154,22 @@ Download:
   - Send a field as `null` with `PATCH` to clear that override.
   - Useful when one instance hosts many devices — e.g. keeping a notification-only
     device out of chat storage without changing the flags for every other device.
+- **Media cache budgets** — Downloaded attachments use an account-scoped,
+  content-addressed path under `statics/media/accounts/`. Repeated downloads of the
+  same content for the same account reuse one file, including the image-handler
+  and webhook paths. Existing URLs and files remain available.
+  - `WHATSAPP_MEDIA_MAX_ACCOUNT_BYTES` / `--media-max-account-bytes`: maximum bytes
+    in each account's new cache.
+  - `WHATSAPP_MEDIA_MAX_TOTAL_BYTES` / `--media-max-total-bytes`: maximum bytes
+    across the media directory, including legacy files.
+  - `WHATSAPP_MEDIA_MIN_FREE_BYTES` / `--media-min-free-bytes`: filesystem space
+    reserved after new writes; supported on Linux and macOS.
+  - All three default to `0` (disabled). Negative values reject cache writes.
+    Limits reject new downloads' cache writes; they do not evict existing files.
+    Existing cached content remains readable when a limit is reached.
+  - Operators remain responsible for retention. External deletions are reconciled
+    at most one minute after the next write attempt. Concurrent writes from this
+    single GOWA process cannot overrun the account or total byte budget.
 - **Webhook signatures** — Webhook requests include an HMAC-SHA-256 signature in the `X-Hub-Signature-256`
   header, generated with the default key `secret`.
 

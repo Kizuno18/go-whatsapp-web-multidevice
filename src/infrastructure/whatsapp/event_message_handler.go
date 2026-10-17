@@ -96,7 +96,7 @@ func handleImageMessage(ctx context.Context, evt *events.Message, client *whatsm
 		return
 	}
 	if img := evt.Message.GetImageMessage(); img != nil {
-		if extracted, err := utils.ExtractMedia(ctx, client, config.PathStorages, img); err != nil {
+		if extracted, err := utils.ExtractMedia(ctx, client, config.PathMedia, img); err != nil {
 			log.Errorf("Failed to download image: %v", err)
 		} else {
 			log.Infof("Image downloaded to %s", extracted.MediaPath)

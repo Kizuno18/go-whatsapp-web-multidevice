@@ -119,13 +119,7 @@ func (service serviceNewsletter) DownloadMedia(ctx context.Context, request doma
 		return response, fmt.Errorf("newsletter message %d does not contain downloadable media", request.ServerID)
 	}
 
-	newsletterDir := utils.ExtractPhoneNumber(JID.String())
-	dateDir := filepath.Join(config.PathMedia, newsletterDir, message.Timestamp.Format("2006-01-02"))
-	if err = os.MkdirAll(dateDir, 0755); err != nil {
-		return response, fmt.Errorf("failed to create media directory: %w", err)
-	}
-
-	extractedMedia, err := utils.ExtractMedia(ctx, client, dateDir, downloadable)
+	extractedMedia, err := utils.ExtractMedia(ctx, client, config.PathMedia, downloadable)
 	if err != nil {
 		return response, fmt.Errorf("failed to download newsletter media: %w", err)
 	}
